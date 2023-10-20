@@ -251,9 +251,14 @@ pub fn main<PB: ProtocolBehavior + Clone + 'static>(
         };
 
         let server = trace.descriptors[0].name;
-        trace
+        let mut context = trace
             .execute_with_non_default_puts(&put_registry, &[(server, put)])
             .unwrap();
+
+        let server = AgentName::first();
+        let shutdown = context.find_agent_mut(server).unwrap().put_mut().shutdown();
+        info!("{}", shutdown);
+
         return ExitCode::SUCCESS;
     } else {
         let experiment_path = if let Some(matches_exp) = matches.subcommand_matches("experiment") {
@@ -406,6 +411,7 @@ use nix::{
 };
 
 use crate::{
+    agent::AgentName,
     algebra::TermType,
     put::{PutDescriptor, PutName},
 };
