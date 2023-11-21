@@ -21,10 +21,13 @@ use std::{
     hash::Hash,
     marker::PhantomData,
 };
+use libafl::inputs::HasBytesVec;
 
 use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
 
+use crate::algebra::{TermEval, TermType};
+use crate::codec::Codec;
 #[allow(unused)] // used in docs
 use crate::stream::Channel;
 use crate::{
@@ -317,12 +320,28 @@ pub struct Trace<M: Matcher> {
     pub prior_traces: Vec<Trace<M>>,
 }
 
+// Either write this for the CrossOver and splice mutations in bit_mutations.rs
+// Or inline the real one but choosing the crossover manually and doing the
+// the same then.
+impl<M: Matcher> HasBytesVec for Trace<M> {
+    fn bytes(&self) -> &[u8] {
+        todo!()
+    }
+
+    fn bytes_mut(&mut self) -> &mut Vec<u8> {
+        todo!()
+    }
+}
+
 /// A [`Trace`] consists of several [`Step`]s. Each has either a [`OutputAction`] or an [`InputAction`].
 /// Each [`Step`]s references an [`Agent`] by name. Furthermore, a trace also has a list of
 /// *AgentDescriptors* which act like a blueprint to spawn [`Agent`]s with a corresponding server
 /// or client role and a specific TLs version. Essentially they are an [`Agent`] without a stream.
 impl<M: Matcher> Trace<M> {
-    fn spawn_agents<PB: ProtocolBehavior>(&self, ctx: &mut TraceContext<PB>) -> Result<(), Error> {
+    pub fn spawn_agents<PB: ProtocolBehavior>(
+        &self,
+        ctx: &mut TraceContext<PB>,
+    ) -> Result<(), Error> {
         for descriptor in &self.descriptors {
             let name = if let Some(reusable) = ctx
                 .agents
@@ -349,7 +368,7 @@ impl<M: Matcher> Trace<M> {
         Ok(())
     }
 
-    pub fn execute<PB>(&self, ctx: &mut TraceContext<PB>) -> Result<(), Error>
+    pub fn execute_until_step<PB>(&self, ctx: &mut TraceContext<PB>, nb_steps: usize) -> Result<(), Error>
     where
         PB: ProtocolBehavior<Matcher = M>,
     {
@@ -359,7 +378,7 @@ impl<M: Matcher> Trace<M> {
             ctx.reset_agents()?;
         }
         self.spawn_agents(ctx)?;
-        let steps = &self.steps;
+        let steps = &self.steps[0..nb_steps];
         for (i, step) in steps.iter().enumerate() {
             debug!("Executing step #{}", i);
 
@@ -381,6 +400,12 @@ impl<M: Matcher> Trace<M> {
         }
 
         Ok(())
+    }
+    pub fn execute<PB>(&self, ctx: &mut TraceContext<PB>) -> Result<(), Error>
+        where
+            PB: ProtocolBehavior<Matcher = M>,
+    {
+        self.execute_until_step(ctx, self.steps.len())
     }
 
     pub fn execute_deterministic<PB>(
@@ -462,7 +487,7 @@ pub enum Action<M: Matcher> {
 }
 
 impl<M: Matcher> Action<M> {
-    fn execute<PB>(&self, step: &Step<M>, ctx: &mut TraceContext<PB>) -> Result<(), Error>
+    pub fn execute<PB>(&self, step: &Step<M>, ctx: &mut TraceContext<PB>) -> Result<(), Error>
     where
         PB: ProtocolBehavior<Matcher = M>,
     {
@@ -559,13 +584,13 @@ impl<M: Matcher> fmt::Display for OutputAction<M> {
 #[derive(Serialize, Deserialize, Clone, Debug, Hash)]
 #[serde(bound = "M: Matcher")]
 pub struct InputAction<M: Matcher> {
-    pub recipe: Term<M>,
+    pub recipe: TermEval<M>,
 }
 
 /// Processes messages in the inbound channel. Uses the recipe field to evaluate to a rustls Message
 /// or a MultiMessage.
 impl<M: Matcher> InputAction<M> {
-    pub fn new_step(agent: AgentName, recipe: Term<M>) -> Step<M> {
+    pub fn new_step(agent: AgentName, recipe: TermEval<M>) -> Step<M> {
         Step {
             agent,
             action: Action::Input(InputAction { recipe }),
@@ -582,20 +607,13 @@ impl<M: Matcher> InputAction<M> {
     {
         // message controlled by the attacker
         let evaluated = self.recipe.evaluate(ctx)?;
-
-        if let Some(msg) = evaluated.as_ref().downcast_ref::<PB::ProtocolMessage>() {
+        if let Some(msg) = PB::OpaqueProtocolMessage::read_bytes(&evaluated) {
+            // TODO-bitlevel: rework the architecture so that we don't need to read-bytes
             msg.debug("Input message");
-
-            ctx.add_to_inbound(step.agent, &msg.create_opaque())?;
-        } else if let Some(opaque_message) = evaluated
-            .as_ref()
-            .downcast_ref::<PB::OpaqueProtocolMessage>()
-        {
-            opaque_message.debug("Input opaque message");
-            ctx.add_to_inbound(step.agent, opaque_message)?;
+            ctx.add_to_inbound(step.agent, &msg)?;
         } else {
             return Err(FnError::Unknown(String::from(
-                "Recipe is not a `ProtocolMessage`, `OpaqueProtocolMessage`!",
+                "Recipe, once evaluated and decoded, is not a `OpaqueProtocolMessage`!",
             ))
             .into());
         }

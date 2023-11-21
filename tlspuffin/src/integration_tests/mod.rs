@@ -2,6 +2,7 @@ use crate::put_registry::TLS_PUT_REGISTRY;
 
 mod mutations;
 mod term_zoo;
+mod terms;
 
 #[test]
 fn version_test() {
@@ -17,6 +18,8 @@ fn version_test() {
     assert!(version.contains("1.1.1j"));
     #[cfg(feature = "openssl111u")]
     assert!(version.contains("1.1.1u"));
+    #[cfg(feature = "openssl312")]
+    assert!(version.contains("3.1.2"));
 
     #[cfg(feature = "wolfssl510")]
     assert!(version.contains("5.1.0"));

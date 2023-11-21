@@ -1,5 +1,7 @@
+use std::fmt::{Debug, Formatter};
 use std::mem;
 
+use puffin::codec;
 use puffin::codec::Codec;
 use ring::digest;
 
@@ -85,6 +87,20 @@ pub struct HandshakeHash {
     client_auth: Option<Vec<u8>>,
 
     override_buffer: Option<Vec<u8>>,
+}
+
+impl Debug for HandshakeHash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "HandshakeHash: {:?}", codec::Encode::get_encoding(self))
+    }
+}
+
+impl codec::Encode for HandshakeHash {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        // TODO-bitlevel: not sure this is the way this should be encoded!! (to test!)
+        let mut hash = self.get_current_hash().as_ref().to_owned();
+        bytes.append(&mut hash)
+    }
 }
 
 impl HandshakeHash {

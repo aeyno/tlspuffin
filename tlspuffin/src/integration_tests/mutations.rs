@@ -1,9 +1,11 @@
+use std::thread::panicking;
+use log::{debug, error};
+use puffin::algebra::TermType;
 use puffin::{
     agent::AgentName,
     algebra::{dynamic_function::DescribableFunction, Term},
-    fuzzer::mutations::{
-        util::TermConstraints, RemoveAndLiftMutator, RepeatMutator, ReplaceMatchMutator,
-        ReplaceReuseMutator,
+    fuzzer::{mutations::{ReplaceReuseMutator, RemoveAndLiftMutator, RepeatMutator, ReplaceMatchMutator},
+             utils::TermConstraints,
     },
     libafl::{
         bolts::rands::{RomuDuoJrRand, StdRand},
@@ -14,6 +16,11 @@ use puffin::{
     put::PutOptions,
     trace::{Action, Step, Trace, TraceContext},
 };
+use puffin::fuzzer::harness::set_default_put_options;
+use puffin::fuzzer::{mutations::MakeMessage,
+                    bit_mutations::*};
+use puffin::fuzzer::mutations::trace_mutations;
+use puffin::libafl::prelude::ByteFlipMutator;
 
 use crate::{
     put_registry::TLS_PUT_REGISTRY,
@@ -28,6 +35,9 @@ use crate::{
         TLS_SIGNATURE,
     },
 };
+use crate::protocol::TLSProtocolBehavior;
+use crate::tls::seeds::{create_corpus, seed_client_attacker, seed_client_attacker_full};
+use crate::tls::trace_helper::TraceHelper;
 
 fn create_state() -> StdState<
     Trace<TlsQueryMatcher>,
@@ -38,6 +48,214 @@ fn create_state() -> StdState<
     let rand = StdRand::with_seed(1235);
     let corpus: InMemoryCorpus<Trace<_>> = InMemoryCorpus::new();
     StdState::new(rand, corpus, InMemoryCorpus::new(), &mut (), &mut ()).unwrap()
+}
+
+
+
+#[cfg(feature = "tls13")] // require version which supports TLS 1.3
+#[test]
+#[test_log::test]
+fn test_make_message() {
+    let mut state = create_state();
+    let mut mutator : MakeMessage<StdState<Trace<TlsQueryMatcher>, InMemoryCorpus<Trace<TlsQueryMatcher>>, RomuDuoJrRand, InMemoryCorpus<Trace<TlsQueryMatcher>>>, TLSProtocolBehavior> = MakeMessage::new(TermConstraints::default());
+
+    let mut ctx = TraceContext::new(&TLS_PUT_REGISTRY, PutOptions::default());
+    ctx.set_deterministic(true);
+    let mut trace = seed_client_attacker_full.build_trace();
+    set_default_put_options(PutOptions::default());
+
+    loop {
+        mutator.mutate(&mut state, &mut trace, 0).unwrap();
+
+        let all_payloads = if let Some(first) = trace.steps.get(0) {
+            match &first.action {
+                Action::Input(input) => Some(input.recipe.all_payloads()),
+                Action::Output(_) => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(payloads) = all_payloads {
+            if !payloads.is_empty() {
+                debug!("MakeMessage created payloads: {:?}", payloads);
+                break;
+            }
+        }
+    }
+}
+
+
+/// Test that MakeMessage can be applied on a strict sub-term and them on a whole term, erasing all payloads of strict sub-terms
+#[cfg(feature = "tls13")] // require version which supports TLS 1.3
+#[test]
+#[test_log::test]
+fn test_byte_remove_payloads() {
+    let mut state = create_state();
+    let mut mutator_make : MakeMessage<StdState<Trace<TlsQueryMatcher>, InMemoryCorpus<Trace<TlsQueryMatcher>>, RomuDuoJrRand, InMemoryCorpus<Trace<TlsQueryMatcher>>>, TLSProtocolBehavior> = MakeMessage::new(TermConstraints::default());
+
+    let mut ctx = TraceContext::new(&TLS_PUT_REGISTRY, PutOptions::default());
+    ctx.set_deterministic(true);
+    let mut trace = seed_client_attacker_full.build_trace();
+    set_default_put_options(PutOptions::default());
+
+    loop {
+        mutator_make.mutate(&mut state, &mut trace, 0).unwrap();
+
+        if let Some(first) = trace.steps.get(0) {
+            match &first.action {
+                Action::Input(input) => {
+                    if let Term::Application(fd, args) = &input.recipe.term {
+                        if args.len() > 5 && input.recipe.is_symbolic() && !args[5].payloads_to_replace().is_empty() {
+                            error!("Found sub-term: {:?}", args[5]);
+                            error!("MakeMessage created new payloads in a strict sub-term: {:?}", args[5].payloads_to_replace());
+                            break;
+                        }
+                    }
+                },
+                Action::Output(_) => {},
+            }
+        }
+    }
+
+    loop {
+        mutator_make.mutate(&mut state, &mut trace, 0).unwrap();
+
+            if let Some(first) = trace.steps.get(0) {
+                match &first.action {
+                    Action::Input(input) => {
+                        if let Term::Application(fd, args) = &input.recipe.term {
+                            if args.len() > 5 &&
+                                !input.recipe.is_symbolic() {
+                                    if args[5].payloads_to_replace().is_empty() &&
+                                        input.recipe.payloads_to_replace().len() == 1
+                                    {
+                                        error!("MakeMessage created new payloads in the client hello {} and removed payloads in the strict sub-terms. New paylaod: {:?}", &input.recipe, input.recipe.payloads.as_ref().unwrap());
+                                        break
+                                    } else {
+                                        panic!("Failed to remove payloads in strict sub-terms when adding a payload at top level")
+                                    }
+                            }
+                        }
+                    },
+                    Action::Output(_) => {},
+                }
+            }
+    }
+}
+
+
+#[cfg(feature = "tls13")] // require version which supports TLS 1.3
+#[test]
+#[test_log::test]
+fn test_byte() {
+    let mut state = create_state();
+    let mut mutator_make : MakeMessage<StdState<Trace<TlsQueryMatcher>, InMemoryCorpus<Trace<TlsQueryMatcher>>, RomuDuoJrRand, InMemoryCorpus<Trace<TlsQueryMatcher>>>, TLSProtocolBehavior> = MakeMessage::new(TermConstraints::default());
+    let mut mutator_byte = ByteFlipMutatorDY::new();
+
+    let mut ctx = TraceContext::new(&TLS_PUT_REGISTRY, PutOptions::default());
+    ctx.set_deterministic(true);
+    let mut trace = seed_client_attacker_full.build_trace();
+    set_default_put_options(PutOptions::default());
+
+    loop {
+        mutator_make.mutate(&mut state, &mut trace, 0).unwrap();
+
+        let all_payloads = if let Some(first) = trace.steps.get(0) {
+            match &first.action {
+                Action::Input(input) => Some(input.recipe.all_payloads()),
+                Action::Output(_) => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(payloads) = all_payloads {
+            if !payloads.is_empty() {
+                error!("MakeMessage created new payloads: {:?}", payloads);
+                break;
+                }
+            }
+        }
+
+    loop {
+        mutator_byte.mutate(&mut state, &mut trace, 0).unwrap();
+
+        if let Some(first) = trace.steps.get(0) {
+            match &first.action {
+                Action::Input(input) => {
+                    let mut found = false;
+                    for payload in input.recipe.all_payloads() {
+                        if payload.payload_0 != payload.payload {
+                            error!("ByteFlipMutatorDY created different payloads: {:?}", payload);
+                            found = true;
+                        }
+                    }
+                    if found {break;}
+                },
+                Action::Output(_) => {},
+            }
+        }
+    }
+}
+
+#[cfg(feature = "tls13")] // require version which supports TLS 1.3
+#[test]
+#[test_log::test]
+fn test_byte_interesting() {
+    let mut state = create_state();
+    let mut mutator_make : MakeMessage<StdState<Trace<TlsQueryMatcher>, InMemoryCorpus<Trace<TlsQueryMatcher>>, RomuDuoJrRand, InMemoryCorpus<Trace<TlsQueryMatcher>>>, TLSProtocolBehavior> = MakeMessage::new(TermConstraints::default());
+    let mut mutator_byte_interesting = ByteInterestingMutatorDY::new();
+
+    let mut ctx = TraceContext::new(&TLS_PUT_REGISTRY, PutOptions::default());
+    ctx.set_deterministic(true);
+    let mut trace = seed_client_attacker_full.build_trace();
+    set_default_put_options(PutOptions::default());
+
+    loop {
+        mutator_make.mutate(&mut state, &mut trace, 0).unwrap();
+
+        let all_payloads = if let Some(first) = trace.steps.get(0) {
+            match &first.action {
+                Action::Input(input) => Some(input.recipe.all_payloads()),
+                Action::Output(_) => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(payloads) = all_payloads {
+            if !payloads.is_empty() {
+                debug!("MakeMessage created new payloads: {:?}", payloads);
+                break;
+            }
+        }
+    }
+
+    loop {
+        mutator_byte_interesting.mutate(&mut state, &mut trace, 0).unwrap();
+
+        if let Some(first) = trace.steps.get(0) {
+            match &first.action {
+                Action::Input(input) => {
+                    let mut found = false;
+                    let t =  &input.recipe;
+                    for payload in t.all_payloads() {
+                        if payload.payload_0 != payload.payload {
+                            debug!("ByteInterestingMutatorDY created different payloads: {:?}", payload);
+                            found = true;
+                        }
+                    }
+                    let e1 = t.evaluate(&ctx).unwrap();
+                    let e2 = t.clone().evaluate_symbolic(&ctx).unwrap();
+                    if found && e1 != e2 {
+                        break;
+                    }
+                },
+                Action::Output(_) => {},
+            }
+        }
+    }
 }
 
 #[test]
@@ -87,10 +305,7 @@ fn test_mutate_seed_cve_2021_3449() {
 
             // Check if we have a client hello in last encrypted one
 
-            let constraints = TermConstraints {
-                min_term_size: 0,
-                max_term_size: 300,
-            };
+            let constraints = TermConstraints::default();
             let mut mutator = ReplaceReuseMutator::new(constraints);
 
             loop {
@@ -100,7 +315,7 @@ fn test_mutate_seed_cve_2021_3449() {
 
                 if let Some(last) = mutate.steps.iter().last() {
                     match &last.action {
-                        Action::Input(input) => match &input.recipe {
+                        Action::Input(input) => match &input.recipe.term {
                             Term::Variable(_) => {}
                             Term::Application(_, subterms) => {
                                 if let Some(first_subterm) = subterms.iter().next() {
@@ -129,7 +344,7 @@ fn test_mutate_seed_cve_2021_3449() {
 
                 if let Some(last) = mutate.steps.iter().last() {
                     match &last.action {
-                        Action::Input(input) => match &input.recipe {
+                        Action::Input(input) => match &input.recipe.term {
                             Term::Variable(_) => {}
                             Term::Application(_, subterms) => {
                                 if let Some(last_subterm) = subterms.iter().last() {
@@ -159,7 +374,7 @@ fn test_mutate_seed_cve_2021_3449() {
                 if let MutationResult::Mutated = result {
                     if let Some(last) = mutate.steps.iter().last() {
                         match &last.action {
-                            Action::Input(input) => match &input.recipe {
+                            Action::Input(input) => match &input.recipe.term {
                                 Term::Variable(_) => {}
                                 Term::Application(_, subterms) => {
                                     if let Some(first_subterm) = subterms.iter().next() {
@@ -198,7 +413,7 @@ fn test_mutate_seed_cve_2021_3449() {
 
                 if let Some(last) = mutate.steps.iter().last() {
                     match &last.action {
-                        Action::Input(input) => match &input.recipe {
+                        Action::Input(input) => match &input.recipe.term {
                             Term::Variable(_) => {}
                             Term::Application(_, subterms) => {
                                 if let Some(first_subterm) = subterms.iter().next() {

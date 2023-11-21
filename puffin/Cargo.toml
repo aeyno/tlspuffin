@@ -20,7 +20,7 @@ libafl = "0.10.1"
 libafl_targets = "0.10.1"
 
 # Logging
-log = "0.4.17"
+log = { version = "0.4.17" }
 log4rs = "1.2.0"
 
 # Other Dependencies
@@ -37,6 +37,8 @@ cfg-if = "1.0.0"
 serde_json = "1.0.81" # Used for StatsMonitor TOOD: Hide behind feature flag
 ahash = "0.8.3"
 nix = "0.25.0"
+paste = "1.0"
+anyhow = "1.0"
 
 [dev-dependencies]
 test-log = "0.2.10"

@@ -22,7 +22,7 @@ use crate::{
         start, FuzzerConfig,
     },
     graphviz::write_graphviz,
-    log::create_stdout_config,
+    log::create_stderr_config,
     protocol::{ProtocolBehavior, ProtocolMessage},
     put::PutOptions,
     put_registry::PutRegistry,
@@ -68,14 +68,23 @@ fn create_app() -> Command {
             Command::new("binary-attack")
                 .about("Serializes a trace as much as possible and output its")
                 .arg(arg!(<input> "The file which stores a trace"))
-                .arg(arg!(<output> "The file to write serialized data to"))
+                .arg(arg!(<output> "The file to write serialized data to")),
+            Command::new("tcp")
+                .about("Executes a trace against a TCP client/server")
+                .arg(arg!(<input> "The file which stores a trace"))
+                .arg(arg!(-c --cwd [p] "The current working directory for the binary"))
+                .arg(arg!(-b --binary [p] "The program to start"))
+                .arg(arg!(-a --args [a] "The args of the program"))
+                .arg(arg!(-t --host [h] "The host to connect to, or the server host"))
+                .arg(arg!(-p --port [n] "The client port to connect to, or the server port")
+                    .value_parser(value_parser!(u16).range(1..)))
         ])
 }
 
 pub fn main<PB: ProtocolBehavior + Clone + 'static>(
     put_registry: &'static PutRegistry<PB>,
 ) -> ExitCode {
-    let handle = match log4rs::init_config(create_stdout_config(LevelFilter::Info)) {
+    let handle = match log4rs::init_config(create_stderr_config(LevelFilter::Info)) {
         Ok(handle) => handle,
         Err(err) => {
             error!("Failed to init logging: {:?}", err);
@@ -138,6 +147,7 @@ pub fn main<PB: ProtocolBehavior + Clone + 'static>(
     } else if let Some(matches) = matches.subcommand_matches("execute") {
         let inputs: ValuesRef<String> = matches.get_many("inputs").unwrap();
         let index: usize = *matches.get_one("index").unwrap_or(&0);
+        let is_batch: bool = matches.get_one::<usize>("index").is_some();
         let n: usize = *matches.get_one("number").unwrap_or(&inputs.len());
 
         let mut paths = inputs
@@ -177,7 +187,7 @@ pub fn main<PB: ProtocolBehavior + Clone + 'static>(
 
         for path in lookup_paths {
             info!("Executing: {}", path.display());
-            execute(&path, put_registry);
+            execute(&path, put_registry, is_batch);
         }
 
         if !lookup_paths.is_empty() {
@@ -206,19 +216,67 @@ pub fn main<PB: ProtocolBehavior + Clone + 'static>(
             error!("Failed to create trace output: {:?}", err);
             return ExitCode::FAILURE;
         }
+    } else if let Some(matches) = matches.subcommand_matches("tcp") {
+        let input: &String = matches.get_one("input").unwrap();
+        let prog: Option<&String> = matches.get_one("binary");
+        let args: Option<&String> = matches.get_one("args");
+        let cwd: Option<&String> = matches.get_one("cwd");
+        let default_host = "127.0.0.1".to_string();
+        let host: &String = matches.get_one("host").unwrap_or(&default_host);
+        let port = matches
+            .get_one::<u16>("port")
+            .unwrap_or(&44338u16)
+            .to_string();
+
+        let trace = Trace::<PB::Matcher>::from_file(input).unwrap();
+        let ctx = TraceContext::new(put_registry, default_put_options().clone());
+
+        let mut options = vec![("port", port.as_str()), ("host", &host)];
+
+        if let Some(prog) = prog {
+            options.push(("prog", &prog))
+        }
+
+        if let Some(args) = args {
+            options.push(("args", &args))
+        }
+
+        if let Some(cwd) = cwd {
+            options.push(("cwd", &cwd))
+        }
+
+        let put = PutDescriptor {
+            name: PutName(['T', 'C', 'P', '_', '_', '_', '_', '_', '_', '_']),
+            options: PutOptions::from_slice_vec(options),
+        };
+
+        let server = trace.descriptors[0].name;
+        let mut context = trace
+            .execute_with_non_default_puts(&put_registry, &[(server, put)])
+            .unwrap();
+
+        let server = AgentName::first();
+        let shutdown = context.find_agent_mut(server).unwrap().put_mut().shutdown();
+        info!("{}", shutdown);
+
+        return ExitCode::SUCCESS;
     } else {
-        let experiment_path = if let Some(matches) = matches.subcommand_matches("experiment") {
-            let title: &String = matches.get_one("title").unwrap();
-            let description: &String = matches.get_one("description").unwrap();
+        let experiment_path = if let Some(matches_exp) = matches.subcommand_matches("experiment") {
+            let title: &String = matches_exp.get_one("title").unwrap();
+            let description: &String = matches_exp.get_one("description").unwrap();
             let experiments_root = PathBuf::new().join("experiments");
             let experiment_path = experiments_root.join(format_title(Some(title), None));
             if experiment_path.as_path().exists() {
                 panic!("Experiment already exists. Consider creating a new experiment.")
             }
 
-            if let Err(err) =
-                write_experiment_markdown(&experiment_path, title, description, put_registry)
-            {
+            if let Err(err) = write_experiment_markdown(
+                &experiment_path,
+                title,
+                description,
+                put_registry,
+                &matches,
+            ) {
                 error!("Failed to write readme: {:?}", err);
                 return ExitCode::FAILURE;
             }
@@ -239,9 +297,13 @@ pub fn main<PB: ProtocolBehavior + Clone + 'static>(
                 i += 1;
             }
 
-            if let Err(err) =
-                write_experiment_markdown(&experiment_path, title, description, put_registry)
-            {
+            if let Err(err) = write_experiment_markdown(
+                &experiment_path,
+                title,
+                description,
+                put_registry,
+                &matches,
+            ) {
                 error!("Failed to write readme: {:?}", err);
                 return ExitCode::FAILURE;
             }
@@ -348,6 +410,12 @@ use nix::{
     unistd::{fork, ForkResult},
 };
 
+use crate::{
+    agent::AgentName,
+    algebra::TermType,
+    put::{PutDescriptor, PutName},
+};
+
 pub fn expect_crash<R>(func: R)
 where
     R: FnOnce(),
@@ -368,14 +436,27 @@ where
 fn execute<PB: ProtocolBehavior, P: AsRef<Path>>(
     input: P,
     put_registry: &'static PutRegistry<PB>,
+    is_batch: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let trace = Trace::<PB::Matcher>::from_file(input.as_ref())?;
 
     info!("Agents: {:?}", &trace.descriptors);
 
-    // When generating coverage a crash means that no coverage is stored
-    // By executing in a fork, even when that process crashes, the other executed code will still yield coverage
-    expect_crash(move || {
+    if is_batch {
+        // When generating coverage a crash means that no coverage is stored
+        // By executing in a fork, even when that process crashes, the other executed code will still yield coverage
+        info!("Executing a batch so: Executing in a fork to avoid not being able to gather coverage in case of crash (for coverage evaluation).");
+        expect_crash(move || {
+            let mut ctx = TraceContext::new(put_registry, default_put_options().clone());
+            if let Err(err) = trace.execute(&mut ctx) {
+                error!(
+                    "Failed to execute trace {}: {:?}",
+                    input.as_ref().display(),
+                    err
+                );
+            }
+        });
+    } else {
         let mut ctx = TraceContext::new(put_registry, default_put_options().clone());
         if let Err(err) = trace.execute(&mut ctx) {
             error!(
@@ -384,8 +465,7 @@ fn execute<PB: ProtocolBehavior, P: AsRef<Path>>(
                 err
             );
         }
-    });
-
+    }
     Ok(())
 }
 
@@ -405,20 +485,9 @@ fn binary_attack<PB: ProtocolBehavior>(
         match step.action {
             Action::Input(input) => {
                 if let Ok(evaluated) = input.recipe.evaluate(&ctx) {
-                    if let Some(msg) = evaluated.as_ref().downcast_ref::<PB::ProtocolMessage>() {
-                        let mut data: Vec<u8> = Vec::new();
-                        msg.create_opaque().encode(&mut data);
-                        f.write_all(&data).expect("Unable to write data");
-                    } else if let Some(opaque_message) = evaluated
-                        .as_ref()
-                        .downcast_ref::<PB::OpaqueProtocolMessage>()
-                    {
-                        let mut data: Vec<u8> = Vec::new();
-                        opaque_message.encode(&mut data);
-                        f.write_all(&data).expect("Unable to write data");
-                    } else {
-                        error!("Recipe is not a `ProtocolMessage` or `OpaqueProtocolMessage`!")
-                    }
+                    f.write_all(&evaluated).expect("Unable to write data");
+                } else {
+                    error!("Recipe is not a `ProtocolMessage` or `OpaqueProtocolMessage`!")
                 }
             }
             Action::Output(_) => {}

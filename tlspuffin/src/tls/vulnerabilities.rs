@@ -1064,6 +1064,7 @@ pub fn seed_cve_2022_39173_minimized(server: AgentName) -> Trace<TlsQueryMatcher
 #[cfg(test)]
 pub mod tests {
 
+    use puffin::algebra::TermType;
     use test_log::test;
 
     use crate::tls::{

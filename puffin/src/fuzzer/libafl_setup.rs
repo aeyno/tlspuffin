@@ -12,7 +12,8 @@ use log4rs::Handle;
 use super::harness;
 use crate::{
     fuzzer::{
-        mutations::{trace_mutations, util::TermConstraints},
+        mutations::trace_mutations,
+        utils::TermConstraints,
         stats_monitor::StatsMonitor,
     },
     log::create_file_config,
@@ -81,10 +82,7 @@ impl Default for MutationConfig {
             fresh_zoo_after: 100000,
             max_trace_length: 15,
             min_trace_length: 2,
-            term_constraints: TermConstraints {
-                min_term_size: 0,
-                max_term_size: 300,
-            },
+            term_constraints: TermConstraints::default(),
         }
     }
 }
@@ -440,7 +438,7 @@ pub fn start<PB: ProtocolBehavior + Clone + 'static>(
 
         let mut builder = RunClientBuilder::new(config.clone(), harness_fn, state, event_manager);
         builder = builder
-            .with_mutations(trace_mutations(
+            .with_mutations(trace_mutations::<_, _, PB>(
                 *min_trace_length,
                 *max_trace_length,
                 *term_constraints,

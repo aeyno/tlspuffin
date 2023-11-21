@@ -1,3 +1,4 @@
+use puffin::algebra::ConcreteMessage;
 use puffin::{
     algebra::{signature::Signature, Matcher},
     error::Error,
@@ -6,7 +7,9 @@ use puffin::{
     trace::Trace,
     variable_data::VariableData,
 };
+use std::any::{Any, TypeId};
 
+use crate::tls::rustls::msgs::message::{any_get_encoding, try_read_bytes};
 use crate::{
     claims::TlsClaim,
     debug::{debug_message_with_info, debug_opaque_message_with_info},
@@ -201,5 +204,13 @@ impl ProtocolBehavior for TLSProtocolBehavior {
 
     fn create_corpus() -> Vec<(Trace<Self::Matcher>, &'static str)> {
         create_corpus()
+    }
+
+    fn any_get_encoding(message: &Box<dyn Any>) -> Result<ConcreteMessage, Error> {
+        any_get_encoding(message)
+    }
+
+    fn try_read_bytes(bitstring: ConcreteMessage, ty: TypeId) -> Result<Box<dyn Any>, Error> {
+        Ok(try_read_bytes(bitstring, ty)?)
     }
 }

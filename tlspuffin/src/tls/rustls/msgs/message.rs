@@ -1,7 +1,21 @@
+use log::{debug, error};
+use puffin::algebra::error::FnError;
+use puffin::algebra::ConcreteMessage;
+use puffin::codec;
+use std::any::{Any, type_name, TypeId};
 use std::convert::TryFrom;
 
-use puffin::codec::{Codec, Reader};
+use puffin::codec::{Codec, Countable, Reader};
+use puffin::error::Error::Term;
+use puffin::protocol::ProtocolMessage;
 
+use crate::tls::rustls::hash_hs::HandshakeHash;
+use crate::tls::rustls::key::{Certificate, PrivateKey};
+use crate::tls::rustls::msgs::enums::{ExtensionType, NamedGroup, SignatureScheme};
+use crate::tls::rustls::msgs::handshake::{
+    CertReqExtension, CertificateEntry, CertificateExtension, ClientExtension, HelloRetryExtension,
+    NewSessionTicketExtension, PresharedKeyIdentity, ServerExtension,
+};
 use crate::tls::rustls::{
     error::Error,
     msgs::{
@@ -11,6 +25,13 @@ use crate::tls::rustls::{
         enums::{AlertDescription, AlertLevel, ContentType, HandshakeType, ProtocolVersion},
         handshake::HandshakeMessagePayload,
         heartbeat::HeartbeatPayload,
+    },
+};
+use crate::tls::{
+    fn_impl::*,
+    rustls::msgs::{
+        enums::{CipherSuite, Compression},
+        handshake::{Random, SessionID},
     },
 };
 
@@ -25,6 +46,11 @@ pub enum MessagePayload {
     Heartbeat(HeartbeatPayload),
 }
 
+impl codec::Encode for MessagePayload {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        MessagePayload::encode(self, bytes);
+    }
+}
 impl MessagePayload {
     pub fn encode(&self, bytes: &mut Vec<u8>) {
         match *self {
@@ -230,16 +256,6 @@ pub struct Message {
     pub payload: MessagePayload,
 }
 
-impl Codec for Message {
-    fn encode(&self, bytes: &mut Vec<u8>) {
-        self.encode(bytes);
-    }
-
-    fn read(reader: &mut Reader) -> Option<Self> {
-        Self::read(reader)
-    }
-}
-
 impl Message {
     pub fn is_handshake_type(&self, hstyp: HandshakeType) -> bool {
         // Bit of a layering violation, but OK.
@@ -312,4 +328,216 @@ pub enum MessageError {
     IllegalLength,
     IllegalContentType,
     IllegalProtocolVersion,
+}
+
+#[macro_export]
+macro_rules! try_downcast {
+  ($message:expr, $T:ty, $($Ts:ty),+) => {
+        $message
+        .downcast_ref::<$T>()
+        .map(|b| {
+            // println!("\n--->> Successfully downcast from {:?}", std::any::type_name::<$T>());
+            let b = codec::Encode::get_encoding(b);
+            // println!("====>> Successfully encoded\n");
+            b
+        })
+        .or_else(|| {
+                // print!("Failed to downcast from {:?}", std::any::type_name::<$T>());
+                try_downcast!($message,$($Ts),+)
+        })
+  };
+    ($message:expr, $T:ty ) => {
+        $message
+        .downcast_ref::<$T>()
+        .map(|b| codec::Encode::get_encoding(b))
+         .or_else(|| {
+                // print!("Failed to downcast from {:?}", std::any::type_name::<$T>());
+                $message
+                .downcast_ref::<Message>()
+                .map(|b| {
+                      // println!("\n--->> Successfully downcast from {:?}", std::any::type_name::<Message>());
+                      let b = codec::Encode::get_encoding(&b.create_opaque());
+                      // println!("====>> Successfully encoded\n");
+                      b
+                })
+        })
+  };
+}
+
+// For all Countable types, we encode list of items of such type by prefixing with the length
+impl Countable for ClientExtension {}
+impl Countable for ServerExtension {}
+impl Countable for HelloRetryExtension {}
+impl Countable for CertReqExtension {}
+impl Countable for CertificateExtension {}
+impl Countable for NewSessionTicketExtension {}
+impl Countable for Compression {}
+impl Countable for Certificate {}
+impl Countable for CertificateEntry {}
+impl Countable for CipherSuite {}
+impl Countable for PresharedKeyIdentity {}
+
+
+// Re-interpret any type of rustls message into bitstrings through successive downcast tries
+pub fn any_get_encoding(message: &Box<dyn Any>) -> Result<ConcreteMessage, puffin::error::Error> {
+    try_downcast!(
+        message,
+        // We list all the types that have the Encode trait and that can be the type of a rustls message
+        // Using term_zoo.rs integration test `test_term_eval, I am able to measure how many generated terms
+        // require each of the encode type below. Can be used to remove non-required ones and possibly
+        // to refine the order of them (heuristics to speed up the encoding).
+        u64, // 3603 fail
+        // u8, // OK
+        // Vec<u64>, // OK
+        Vec<u8>,         // 2385 Fail
+        bool,            // 400 Fail
+        Vec<Vec<u8>>,    // Fail 332
+        Option<Vec<u8>>, // Fail 542
+        // Option<Vec<Vec<u8>>>, // OK
+        // Result<Option<Vec<u8>>, FnError>, // OK
+        // Result<Vec<u8>, FnError>, // OK
+        // Result<bool, FnError>, // OK
+        // Result<Vec<u8>, FnError>,
+        // Result<Vec<Vec<u8>>, FnError>,
+        //
+        // Message, // 4185 Fail  TODOOO
+        // Result<Message, FnError>,
+        // MessagePayload,
+        // ExtensionType,
+        NamedGroup,           // 407
+        Vec<ClientExtension>, //368
+        ClientExtension,      // 4067
+        Vec<ServerExtension>, // TODO
+        ServerExtension,
+        Vec<HelloRetryExtension>,
+        HelloRetryExtension,
+        Vec<CertReqExtension>,
+        CertReqExtension,
+        Vec<CertificateExtension>,
+        CertificateExtension,
+        NewSessionTicketExtension,
+        Vec<NewSessionTicketExtension>,
+        Random,
+        Vec<Compression>,
+        Compression,
+        SessionID,
+        Vec<Certificate>,
+        Certificate,
+        Vec<CertificateEntry>,
+        CertificateEntry,
+        HandshakeHash,
+        PrivateKey,
+        Vec<CipherSuite>,
+        CipherSuite,
+        Vec<PresharedKeyIdentity>,
+        PresharedKeyIdentity,
+        AlertMessagePayload,
+        SignatureScheme, // 800
+        OpaqueMessage,   // 337
+        ProtocolVersion  // 400
+    )
+    .ok_or(
+        Term(format!(
+            "[any_get_encoding] Failed to downcast and then any_encode::get_encoding message {:?}",
+            &message
+        ))
+        .into(),
+    )
+}
+
+#[macro_export]
+macro_rules! try_read {
+  ($bitstring:expr, $ti:expr, $T:ty, $($Ts:ty),+) => {
+      if $ti == TypeId::of::<$T>() {
+        <$T>::read_bytes(& $bitstring).ok_or(Term(format!(
+                "[try_read_bytes] Failed to read to type {:?} the bitstring {:?}",
+                core::any::type_name::<$T>(),
+                & $bitstring
+            )).into()).map(|v| Box::new(v) as Box<dyn Any>)
+    } else {
+        try_read!($bitstring, $ti, $($Ts),+)
+    }
+  };
+    ($bitstring:expr, $ti:expr, $T:ty ) => {
+        if $ti == TypeId::of::<$T>() {
+            <$T>::read_bytes(& $bitstring).ok_or(Term(format!(
+                "[try_read_bytes] Failed to read to type {:?} the bitstring {:?}",
+                core::any::type_name::<$T>(),
+                & $bitstring
+            )).into()).map(|v| Box::new(v) as Box<dyn Any>)
+    } else {
+            // error!(
+            //     "[try_read_bytes] Failed to find a suitable type with typeID {:?} to read the bitstring {:?}",
+            //     $ti,
+            //     & $bitstring
+            // );
+           Err(Term(format!(
+                "[try_read_bytes] Failed to find a suitable type with typeID {:?} to read the bitstring {:?}",
+                $ti,
+                & $bitstring
+            )).into())
+      }
+  };
+}
+
+pub fn try_read_bytes(bitstring: ConcreteMessage, ty: TypeId) -> Result<Box<dyn Any>, puffin::error::Error> {
+    if ty == TypeId::of::<Message>() {
+        <OpaqueMessage>::read_bytes(& bitstring).ok_or(Term(format!(
+                "[try_read_bytes] Failed to read to type OpaqueMessage (ty was Message though) the bitstring {:?}",
+                & bitstring
+            )).into()).map(|v| Box::new(Message::try_from(v)) as Box<dyn Any>)
+    } else {
+        try_read!(
+            bitstring,
+            ty,
+            // We list all the types that have the Codec trait and that can be the type of a rustls message
+            ClientExtension,
+            Vec<ServerExtension>,
+            ServerExtension,
+            Vec<HelloRetryExtension>,
+            HelloRetryExtension,
+            Vec<CertReqExtension>,
+            CertReqExtension,
+            Vec<CertificateExtension>,
+            CertificateExtension,
+            NewSessionTicketExtension,
+            Vec<NewSessionTicketExtension>,
+            Random,
+            Vec<Compression>,
+            Compression,
+            SessionID,
+            Vec<Certificate>,
+            Certificate,
+            Vec<CertificateEntry>,
+            CertificateEntry,
+            // HandshakeHash,
+            // PrivateKey,
+            Vec<CipherSuite>,
+            CipherSuite,
+            Vec<PresharedKeyIdentity>,
+            PresharedKeyIdentity,
+            AlertMessagePayload,
+            SignatureScheme,
+            OpaqueMessage,
+            ProtocolVersion,
+            u64,
+            // u8,
+            // Vec<u64>,
+            Vec<u8>,
+            Vec<Vec<u8>>,
+            // Option<Vec<Vec<u8>>>,
+            // Result<Option<Vec<u8>>, FnError>,
+            // Result<Vec<u8>, FnError>,
+            // Result<bool, FnError>,
+            // Result<Vec<u8>, FnError>,
+            // Result<Vec<Vec<u8>>, FnError>,
+            //
+            // Message,
+            // Result<Message, FnError>,
+            // MessagePayload,
+            // ExtensionType,
+            NamedGroup,
+            Vec<ClientExtension>
+        )
+    }
 }

@@ -2,6 +2,7 @@
 //! handshake or an execution which crashes OpenSSL.
 #![allow(dead_code)]
 
+use puffin::algebra::TermEval;
 use puffin::{
     agent::{AgentDescriptor, AgentName, AgentType, TLSVersion},
     algebra::Term,
@@ -1013,7 +1014,7 @@ pub fn seed_client_attacker12(server: AgentName) -> Trace<TlsQueryMatcher> {
 
 pub fn _seed_client_attacker12(
     server: AgentName,
-) -> (Trace<TlsQueryMatcher>, Term<TlsQueryMatcher>) {
+) -> (Trace<TlsQueryMatcher>, TermEval<TlsQueryMatcher>) {
     let client_hello = term! {
           fn_client_hello(
             fn_protocol_version12,
@@ -1408,9 +1409,9 @@ pub fn _seed_client_attacker_full(
     server: AgentName,
 ) -> (
     Trace<TlsQueryMatcher>,
-    Term<TlsQueryMatcher>,
-    Term<TlsQueryMatcher>,
-    Term<TlsQueryMatcher>,
+    TermEval<TlsQueryMatcher>,
+    TermEval<TlsQueryMatcher>,
+    TermEval<TlsQueryMatcher>,
 ) {
     let client_hello = term! {
           fn_client_hello(
@@ -1835,11 +1836,23 @@ pub fn create_corpus() -> Vec<(Trace<TlsQueryMatcher>, &'static str)> {
 #[cfg(test)]
 pub mod tests {
 
+    use log::debug;
+    use puffin::algebra::error::FnError;
+    use puffin::algebra::{Payloads, replace_payloads, TermType, term::evaluate_lazy_test};
+    use puffin::codec::Codec;
+    use puffin::trace::TraceContext;
     use puffin::{agent::AgentName, trace::Action};
     use test_log::test;
 
     use super::*;
+    use crate::protocol::TLSProtocolBehavior;
+    use crate::tls::rustls::msgs::message::OpaqueMessage;
     use crate::{put_registry::TLS_PUT_REGISTRY, tls::trace_helper::TraceHelper};
+    use puffin::fuzzer::harness::default_put_options;
+    use puffin::libafl::inputs::HasBytesVec;
+    use puffin::protocol::{OpaqueProtocolMessage, ProtocolBehavior, ProtocolMessage};
+    use puffin::put::PutOptions;
+    use puffin::trace::Action::Input;
 
     #[test]
     fn test_version() {

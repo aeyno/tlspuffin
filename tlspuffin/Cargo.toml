@@ -60,6 +60,20 @@ openssl111u = [
     "transcript-extraction",
     "client-authentication-transcript-extraction",
 ]
+openssl312 = [
+    "openssl-src",
+    "openssl-src/openssl312",
+    "openssl-src/no-rand",
+    "tls12",
+    "tls13",
+    "tls12-session-resumption",
+    "tls13-session-resumption",
+    "deterministic",
+    "claims",
+    "openssl111-binding",
+    "transcript-extraction",
+    "client-authentication-transcript-extraction",
+]
 openssl101f = [
     "openssl-src",
     "openssl-src/openssl101f",
@@ -147,6 +161,19 @@ wolfssl540 = [
     # FIXME: support "claims", "deterministic"
 ]
 
+wolfssl563 = [
+    "wolfssl-sys/vendored-wolfssl563",
+    "tls12",
+    "tls13",
+    "wolfssl-binding",
+    "tls12-session-resumption",
+    "tls13-session-resumption",
+    "transcript-extraction",
+    "client-authentication-transcript-extraction"
+    # FIXME: support "claims", "deterministic"
+]
+
+
 fix-CVE-2022-25638 = ["wolfssl-sys?/fix-CVE-2022-25638"]
 fix-CVE-2022-25640 = ["wolfssl-sys?/fix-CVE-2022-25640"]
 fix-CVE-2022-39173 = ["wolfssl-sys?/fix-CVE-2022-39173"]
@@ -211,7 +238,7 @@ introspection = ["puffin/introspection"]
 
 puffin = { path = "../puffin" }
 
-log = "0.4.17"
+log = { version = "0.4.17" }
 itertools = "0.10.3"
 smallvec = "1.8.1"
 libc = { version = "0.2.126" }
@@ -222,7 +249,7 @@ serde = { version = "1.0.137", features = ["derive"] }
 ring = { version = "0.16.20", features = ["std"] }
 webpki = { version = "0.22.0", features = ["alloc", "std"] }
 sct = "0.7.0"
-
+tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_off"] }
 
 
 # OpenSSL
